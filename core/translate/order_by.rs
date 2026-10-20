@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    emitter::TranslateCtx,
+    emitter::{Resolver, TranslateCtx},
     expr::translate_expr,
     plan::{Distinctness, ResultSetColumn, SelectPlan, TableReferences},
     result_row::{emit_offset, emit_result_row_and_limit},
@@ -280,46 +280,32 @@ impl EmitOrderBy {
              * then the collating sequence of the column is used to determine sort order.
              * If the expression is not a column and has no COLLATE clause, then the BINARY collating sequence is used.
              */
-            let mut order_collations_nulls: Vec<(
-                SortOrder,
-                Option<CollationSeq>,
-                Option<turso_parser::ast::NullsOrder>,
-            )> = order_by
-                .iter()
-                .map(|(expr, dir, nulls)| {
-                    let collation = Some(resolve_comparison_collseq_with_symbols(
-                        expr,
-                        expr,
-                        referenced_tables,
-                        Some(t_ctx.resolver.symbol_table),
-                    )?);
-                    Ok::<_, crate::LimboError>((*dir, collation, *nulls))
-                })
-                .try_collect::<Result<Vec<_>>>()??;
-
-            // Resolve custom type comparators for ORDER BY columns.
-            // For types with a `<` operator, the comparator is used for correct sort ordering.
-            let mut comparators: Vec<Option<SortComparatorType>> = order_by
-                .iter()
-                .map(|(expr, _, _)| {
-                    custom_type_comparator(expr, referenced_tables, t_ctx.resolver.schema())
-                })
-                .try_collect()?;
+            let mut keys = sorter_keys(
+                order_by
+                    .iter()
+                    .map(|(expr, dir, nulls)| (expr.as_ref(), *dir, *nulls)),
+                referenced_tables,
+                &t_ctx.resolver,
+            )?;
 
             if has_sequence {
                 // sequence column: ascending with BINARY collation, no comparator, no nulls order
-                order_collations_nulls.push((SortOrder::Asc, Some(CollationSeq::default()), None));
-                comparators.try_push(None)?;
+                keys.order_collations_nulls.try_push((
+                    SortOrder::Asc,
+                    Some(CollationSeq::default()),
+                    None,
+                ))?;
+                keys.comparators.try_push(None)?;
             }
 
-            let key_len = order_collations_nulls.len();
+            let key_len = keys.order_collations_nulls.len();
 
             program.emit_insn(Insn::SorterOpen {
                 data: Box::new(SorterOpenData {
                     cursor_id: sort_cursor,
                     columns: key_len,
-                    order_collations_nulls,
-                    comparators,
+                    order_collations_nulls: keys.order_collations_nulls,
+                    comparators: keys.comparators,
                 }),
             });
         }
@@ -712,6 +698,37 @@ impl EmitOrderBy {
         }
         Ok(())
     }
+}
+
+pub(crate) struct SorterKeys {
+    pub order_collations_nulls: Vec<(SortOrder, Option<CollationSeq>, Option<ast::NullsOrder>)>,
+    pub comparators: Vec<Option<SortComparatorType>>,
+}
+
+pub(crate) fn sorter_keys<'a>(
+    terms: impl IntoIterator<Item = (&'a ast::Expr, SortOrder, Option<ast::NullsOrder>)>,
+    tables: &TableReferences,
+    resolver: &Resolver,
+) -> Result<SorterKeys> {
+    let terms = terms.into_iter();
+    let capacity = terms.size_hint().0;
+    let mut keys = SorterKeys {
+        order_collations_nulls: Vec::try_with_capacity_ext(capacity)?,
+        comparators: Vec::try_with_capacity_ext(capacity)?,
+    };
+    for (expr, direction, nulls) in terms {
+        let collation = resolve_comparison_collseq_with_symbols(
+            expr,
+            expr,
+            tables,
+            Some(resolver.symbol_table),
+        )?;
+        keys.order_collations_nulls
+            .try_push((direction, Some(collation), nulls))?;
+        keys.comparators
+            .try_push(custom_type_comparator(expr, tables, resolver.schema()))?;
+    }
+    Ok(keys)
 }
 
 /// Emits the bytecode for inserting a row into a sorter.
