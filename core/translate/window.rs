@@ -3202,6 +3202,7 @@ fn emit_function_step(
                         acc_reg,
                         &t_ctx.resolver,
                         None,
+                        None,
                     )?;
 
                     if let Some(label) = filter_skip_label {
@@ -3220,6 +3221,7 @@ fn emit_function_step(
                         func: AccumulatorFunc::Window(win_func.clone()),
                         comparator: None,
                         collation: None,
+                        changed_reg: None,
                     }),
                 });
             }

@@ -16,7 +16,7 @@ use super::{
     emitter::{OperationMode, Resolver, TranslateCtx},
     expr::{
         resolve_expr, translate_condition_expr, translate_expr, translate_expr_no_constant_opt,
-        ConditionMetadata, NoConstantOptReason,
+        walk_expr, ConditionMetadata, NoConstantOptReason, WalkControl,
     },
     plan::{
         Aggregate, Distinctness, EvalAt, NonFromClauseSubquery, SelectPlan, SubqueryEvalPhase,
@@ -54,6 +54,14 @@ pub fn emit_ungrouped_aggregation<'a>(
             false,
             None,
         );
+    }
+    for (expr, reg) in t_ctx.ungrouped_column_regs.iter() {
+        t_ctx.resolver.cache_scalar_expr_reg(
+            std::borrow::Cow::Owned(expr.clone()),
+            *reg,
+            false,
+            &plan.table_references,
+        )?;
     }
     t_ctx.resolver.enable_expr_to_reg_cache();
 
@@ -212,6 +220,68 @@ pub fn emit_ungrouped_aggregation<'a>(
     program.preassign_label_to_next_insn(end_label);
 
     Ok(())
+}
+
+/// Collects the table columns that a result column containing aggregates
+/// (e.g. CASE WHEN SUM(1) THEN a ELSE b END) or a HAVING term (e.g. HAVING a > 0)
+/// reads outside an aggregate function, and gives each a register set to NULL.
+/// The main loop copies the column values into these registers while the cursor
+/// is still valid, so that the expressions evaluated after AggFinal read them
+/// instead of the exhausted cursor. The registers are set to NULL here, before
+/// the loop, so that they read NULL if no row reaches the aggregate, also when
+/// a subquery runs again.
+/// Columns of an outer query are not collected: the outer cursor does not move
+/// while this loop runs, and a value read in the loop would be stale for an
+/// outer row where this loop finds no rows.
+pub fn init_ungrouped_column_regs(
+    program: &mut ProgramBuilder,
+    plan: &SelectPlan,
+) -> Result<Vec<(ast::Expr, usize)>> {
+    let having = plan
+        .group_by
+        .as_ref()
+        .and_then(|group_by| group_by.having.as_deref())
+        .unwrap_or_default();
+    let mut columns = Vec::new();
+    for expr in plan
+        .result_columns
+        .iter()
+        .filter(|rc| rc.contains_aggregates)
+        .map(|rc| &rc.expr)
+        .chain(having)
+    {
+        walk_expr(expr, &mut |expr: &ast::Expr| -> Result<WalkControl> {
+            match expr {
+                ast::Expr::Column { table, .. } | ast::Expr::RowId { table, .. }
+                    if plan
+                        .table_references
+                        .find_joined_table_by_internal_id(*table)
+                        .is_none() =>
+                {
+                    Ok(WalkControl::SkipChildren)
+                }
+                ast::Expr::Column { .. } | ast::Expr::RowId { .. } => {
+                    columns.push(expr.clone());
+                    Ok(WalkControl::SkipChildren)
+                }
+                _ => {
+                    if plan.aggregates.iter().any(|a| a.original_expr == *expr) {
+                        return Ok(WalkControl::SkipChildren);
+                    }
+                    Ok(WalkControl::Continue)
+                }
+            }
+        })?;
+    }
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let start_reg = program.alloc_registers_and_init_w_null(columns.len());
+    Ok(columns
+        .into_iter()
+        .enumerate()
+        .map(|(i, expr)| (expr, start_reg + i))
+        .collect())
 }
 
 /// Resolves the collation a comparison-based aggregate uses for its argument
@@ -386,6 +456,9 @@ pub fn translate_aggregation_step(
     // For `percentile_cont` / `percentile_disc`: register pre-evaluated by
     // `InitLoop::emit`. `None` for any other aggregate.
     fraction_reg: Option<usize>,
+    // Register that a MIN/MAX step sets (see `AggStepData::changed_reg`).
+    // Other aggregates ignore it.
+    min_max_changed_reg: Option<usize>,
 ) -> Result<usize> {
     let num_args = agg_arg_source.num_args();
     let func = agg_arg_source.agg_func();
@@ -404,6 +477,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Avg),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -420,6 +494,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Count0),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -438,6 +513,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Count),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -466,6 +542,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::GroupConcat),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
 
@@ -489,6 +566,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Max),
                     comparator,
                     collation: Some(arg_collation),
+                    changed_reg: min_max_changed_reg,
                 }),
             });
             target_register
@@ -511,6 +589,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Min),
                     comparator,
                     collation: Some(arg_collation),
+                    changed_reg: min_max_changed_reg,
                 }),
             });
             target_register
@@ -532,6 +611,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::JsonGroupObject),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -551,6 +631,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::JsonGroupArray),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -572,6 +653,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::StringAgg),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
 
@@ -591,6 +673,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Sum),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -609,6 +692,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Total),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -628,6 +712,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::ArrayAgg),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -649,6 +734,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(AggFunc::Mode),
                     comparator: None,
                     collation: Some(arg_collation),
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -674,6 +760,7 @@ pub fn translate_aggregation_step(
                     func: AccumulatorFunc::Agg(func.clone()),
                     comparator: None,
                     collation: Some(arg_collation),
+                    changed_reg: None,
                 }),
             });
             target_register
@@ -716,6 +803,7 @@ pub fn translate_aggregation_step(
                     })),
                     comparator: None,
                     collation: None,
+                    changed_reg: None,
                 }),
             });
             target_register
