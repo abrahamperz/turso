@@ -2084,6 +2084,7 @@ impl Schema {
                             unique_set.columns.len(),
                             unique_set.conflict_clause,
                             &unique_set.columns,
+                            unique_set.constraint_name.clone(),
                         )?))?;
                     } else if mvcc_enabled {
                         // In MVCC mode, automatic indices might not be fully populated yet during recovery
@@ -2117,6 +2118,7 @@ impl Schema {
                             column_indices_and_sort_orders,
                             unique_set.conflict_clause,
                             &unique_set.columns,
+                            unique_set.constraint_name.clone(),
                         )?))?;
                     } else if mvcc_enabled {
                         // In MVCC mode, automatic indices might not be fully populated yet during recovery
@@ -2342,6 +2344,7 @@ impl Schema {
                 foreign_keys: vec![],
                 check_constraints: vec![],
                 rowid_alias_conflict_clause: None,
+                primary_key_constraint_name: None,
                 unique_sets: vec![],
                 has_virtual_columns: false,
                 logical_to_physical_map,
@@ -3078,6 +3081,7 @@ impl TryClone for UniqueSet {
             columns: self.columns.try_clone()?,
             is_primary_key: self.is_primary_key,
             conflict_clause: self.conflict_clause,
+            constraint_name: self.constraint_name.clone(),
         })
     }
 }
@@ -3149,6 +3153,7 @@ impl TryClone for BTreeTable {
             foreign_keys: self.foreign_keys.try_clone()?,
             check_constraints: self.check_constraints.try_clone()?,
             rowid_alias_conflict_clause: self.rowid_alias_conflict_clause,
+            primary_key_constraint_name: self.primary_key_constraint_name.clone(),
             has_virtual_columns: self.has_virtual_columns,
             logical_to_physical_map: self.logical_to_physical_map.try_clone()?,
             column_dependencies: Default::default(),
@@ -3215,6 +3220,7 @@ impl TryClone for Index {
             where_clause: self.where_clause.clone(),
             index_method: self.index_method.clone(),
             on_conflict: self.on_conflict,
+            constraint_name: self.constraint_name.clone(),
         })
     }
 }
@@ -3576,6 +3582,8 @@ pub struct UniqueSet {
     pub columns: Vec<UniqueSetColumn>,
     pub is_primary_key: bool,
     pub conflict_clause: Option<ResolveType>,
+    /// Explicit constraint name from `CONSTRAINT name UNIQUE/PRIMARY KEY`, if given.
+    pub constraint_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -3760,6 +3768,7 @@ pub struct BTreeTable {
     /// ON CONFLICT clause for the INTEGER PRIMARY KEY constraint.
     /// Stored here because rowid-alias PKs have their UniqueSet removed.
     pub rowid_alias_conflict_clause: Option<ResolveType>,
+    pub primary_key_constraint_name: Option<String>,
     pub has_virtual_columns: bool,
     pub logical_to_physical_map: Vec<usize>,
     column_dependencies: ResetOnClone<OnceLock<GeneratedColGraph>>,
@@ -3812,6 +3821,10 @@ impl BTreeTable {
         let has_rowid = characteristics.contains(BTreeCharacteristics::HAS_ROWID);
         let logical_to_physical_map =
             Self::build_logical_to_physical_map(&columns, &primary_key_columns, has_rowid);
+        let primary_key_constraint_name = unique_sets
+            .iter()
+            .find(|set| set.is_primary_key)
+            .and_then(|set| set.constraint_name.clone());
         Self {
             root_page,
             name,
@@ -3824,6 +3837,7 @@ impl BTreeTable {
             foreign_keys,
             check_constraints,
             rowid_alias_conflict_clause,
+            primary_key_constraint_name,
             has_virtual_columns,
             logical_to_physical_map,
             column_dependencies: Default::default(),
@@ -4051,6 +4065,10 @@ impl BTreeTable {
                 push_on_conflict_clause(&mut sql, self.inline_unique_conflict_clause(column_name));
             }
             if needs_pk_inline && column.primary_key() {
+                if let Some(name) = &self.primary_key_constraint_name {
+                    sql.push_str(" CONSTRAINT ");
+                    sql.push_str(&quote_ident(name));
+                }
                 sql.push_str(" PRIMARY KEY");
                 if !column.is_rowid_alias() && self.primary_key_columns[0].1 == SortOrder::Desc {
                     sql.push_str(" DESC");
@@ -4094,7 +4112,13 @@ impl BTreeTable {
         let has_table_pk = !self.primary_key_columns.is_empty();
         // Add table-level PRIMARY KEY constraint if exists
         if !needs_pk_inline && has_table_pk {
-            sql.push_str(", PRIMARY KEY (");
+            sql.push_str(", ");
+            if let Some(name) = &self.primary_key_constraint_name {
+                sql.push_str("CONSTRAINT ");
+                sql.push_str(&quote_ident(name));
+                sql.push(' ');
+            }
+            sql.push_str("PRIMARY KEY (");
             for (i, col) in self.primary_key_columns.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
@@ -4110,7 +4134,13 @@ impl BTreeTable {
         }
 
         for fk in &self.foreign_keys {
-            sql.push_str(", FOREIGN KEY (");
+            sql.push_str(", ");
+            if let Some(name) = &fk.constraint_name {
+                sql.push_str("CONSTRAINT ");
+                sql.push_str(&quote_ident(name));
+                sql.push(' ');
+            }
+            sql.push_str("FOREIGN KEY (");
             for (i, col) in fk.child_columns.iter().enumerate() {
                 if i > 0 {
                     sql.push_str(", ");
@@ -5088,6 +5118,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                         columns: pk_unique_set_columns,
                         is_primary_key: true,
                         conflict_clause: *conflict_clause,
+                        constraint_name: c.name.as_ref().map(|n| normalize_ident(n.as_str())),
                     })?;
                 } else if let ast::TableConstraint::Unique {
                     columns,
@@ -5119,6 +5150,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                         columns: unique_columns,
                         is_primary_key: false,
                         conflict_clause: *conflict_clause,
+                        constraint_name: c.name.as_ref().map(|n| normalize_ident(n.as_str())),
                     };
                     unique_sets_constraints.try_push(unique_set)?;
                 } else if let ast::TableConstraint::ForeignKey {
@@ -5160,6 +5192,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                         None => false, // NOT DEFERRABLE INITIALLY IMMEDIATE by default
                     };
                     let fk = ForeignKey {
+                        constraint_name: c.name.as_ref().map(|n| normalize_ident(n.as_str())),
                         parent_table,
                         parent_columns,
                         child_columns,
@@ -5304,6 +5337,10 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                                 }]?,
                                 is_primary_key: true,
                                 conflict_clause: *conflict_clause,
+                                constraint_name: c_def
+                                    .name
+                                    .as_ref()
+                                    .map(|n| normalize_ident(n.as_str())),
                             })?;
                         }
                         ast::ColumnConstraint::NotNull {
@@ -5332,6 +5369,10 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                                 }]?,
                                 is_primary_key: false,
                                 conflict_clause: *conflict,
+                                constraint_name: c_def
+                                    .name
+                                    .as_ref()
+                                    .map(|n| normalize_ident(n.as_str())),
                             })?;
                         }
                         ast::ColumnConstraint::Collate { ref collation_name } => {
@@ -5355,6 +5396,10 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
                                 );
                             }
                             let fk = ForeignKey {
+                                constraint_name: c_def
+                                    .name
+                                    .as_ref()
+                                    .map(|n| normalize_ident(n.as_str())),
                                 parent_table: normalize_ident(clause.tbl_name.as_str()),
                                 parent_columns: clause
                                     .columns
@@ -5526,6 +5571,10 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
         .iter()
         .find(|us| us.is_primary_key)
         .and_then(|us| us.conflict_clause);
+    let primary_key_constraint_name = unique_sets
+        .iter()
+        .find(|set| set.is_primary_key)
+        .and_then(|set| set.constraint_name.clone());
     for col in cols.iter() {
         if col.is_rowid_alias() {
             // Unique sets are used for creating automatic indexes. An index is not created for a rowid alias PRIMARY KEY.
@@ -5598,6 +5647,7 @@ pub fn create_table(tbl_name: &str, body: &CreateTableBody, root_page: i64) -> R
         },
         check_constraints,
         rowid_alias_conflict_clause,
+        primary_key_constraint_name,
         has_virtual_columns: false,
         logical_to_physical_map: vec![],
         column_dependencies: Default::default(),
@@ -5668,6 +5718,7 @@ pub fn _build_pseudo_table(columns: &[ResultColumn]) -> PseudoCursorType {
 
 #[derive(Debug, Clone)]
 pub struct ForeignKey {
+    pub constraint_name: Option<String>,
     /// Columns in this table (child side). Never empty (validated at parse time).
     pub child_columns: Box<[String]>,
     /// Referenced (parent) table
@@ -6308,6 +6359,7 @@ pub fn sqlite_schema_table() -> Result<BTreeTable> {
         foreign_keys: try_vec![]?,
         check_constraints: try_vec![]?,
         rowid_alias_conflict_clause: None,
+        primary_key_constraint_name: None,
         unique_sets: try_vec![]?,
         has_virtual_columns: false,
         logical_to_physical_map,
@@ -6334,6 +6386,8 @@ pub struct Index {
     pub index_method: Option<Arc<dyn IndexMethodAttachment>>,
     /// ON CONFLICT clause from the constraint definition (PRIMARY KEY or UNIQUE).
     pub on_conflict: Option<ResolveType>,
+    /// Explicit constraint name from `CONSTRAINT name UNIQUE/PRIMARY KEY`, if any.
+    pub constraint_name: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -6473,6 +6527,7 @@ impl Index {
                         where_clause: None,
                         index_method: Some(descriptor),
                         on_conflict: None,
+                        constraint_name: None,
                     })
                 } else {
                     Ok(Index {
@@ -6486,6 +6541,7 @@ impl Index {
                         where_clause,
                         index_method: None,
                         on_conflict: None,
+                        constraint_name: None,
                     })
                 }
             }
@@ -6516,6 +6572,7 @@ impl Index {
         column_count: usize,
         conflict_clause: Option<ResolveType>,
         constraint_columns: &[UniqueSetColumn],
+        constraint_name: Option<String>,
     ) -> Result<Index> {
         let has_primary_key_index =
             table.get_rowid_alias_column().is_none() && !table.primary_key_columns.is_empty();
@@ -6560,6 +6617,7 @@ impl Index {
             where_clause: None,
             index_method: None,
             on_conflict: conflict_clause,
+            constraint_name,
         })
     }
 
@@ -6569,6 +6627,7 @@ impl Index {
         column_indices_and_sort_orders: Vec<(usize, SortOrder)>,
         conflict_clause: Option<ResolveType>,
         constraint_columns: &[UniqueSetColumn],
+        constraint_name: Option<String>,
     ) -> Result<Index> {
         let (index_name, root_page) = auto_index;
 
@@ -6612,6 +6671,7 @@ impl Index {
             where_clause: None,
             index_method: None,
             on_conflict: conflict_clause,
+            constraint_name,
         })
     }
 
@@ -7487,6 +7547,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
         )
         .unwrap();
     }
@@ -7501,6 +7562,7 @@ mod tests {
             2,
             None,
             &[],
+            None,
         )?;
 
         assert_eq!(index.name, "sqlite_autoindex_t1_1");
@@ -7526,6 +7588,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
         )
         .unwrap();
     }
@@ -7552,6 +7615,7 @@ mod tests {
             foreign_keys: vec![],
             check_constraints: vec![],
             rowid_alias_conflict_clause: None,
+            primary_key_constraint_name: None,
             has_virtual_columns: false,
             logical_to_physical_map,
             column_dependencies: Default::default(),
@@ -7563,6 +7627,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
         );
         assert!(result.is_err());
     }
@@ -7577,6 +7642,7 @@ mod tests {
             vec![(1, SortOrder::Asc)],
             None,
             &[],
+            None,
         )?;
 
         assert_eq!(index.name, "sqlite_autoindex_t1_1");
@@ -7600,6 +7666,7 @@ mod tests {
                 1,
                 None,
                 &[],
+                None,
             )?,
             Index::automatic_from_unique(
                 &table,
@@ -7607,6 +7674,7 @@ mod tests {
                 vec![(1, SortOrder::Asc)],
                 None,
                 &[],
+                None,
             )?,
         ];
 
@@ -7645,6 +7713,7 @@ mod tests {
                 1,
                 None,
                 &[],
+                None,
             )?,
             Index::automatic_from_unique(
                 &table,
@@ -7652,6 +7721,7 @@ mod tests {
                 vec![(1, SortOrder::Asc)],
                 None,
                 &[],
+                None,
             )?,
             Index::automatic_from_unique(
                 &table,
@@ -7659,6 +7729,7 @@ mod tests {
                 vec![(2, SortOrder::Asc), (3, SortOrder::Asc)],
                 None,
                 &[],
+                None,
             )?,
         ];
 
@@ -7699,6 +7770,7 @@ mod tests {
             vec![(0, SortOrder::Asc), (1, SortOrder::Asc)],
             None,
             &[],
+            None,
         )?;
 
         assert_eq!(index.name, "sqlite_autoindex_t1_1");
@@ -7724,6 +7796,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
         )?;
 
         assert_eq!(index.name, "sqlite_autoindex_t1_1");
@@ -7747,6 +7820,7 @@ mod tests {
             2,
             None,
             &[],
+            None,
         )?;
 
         assert_eq!(index.name, "sqlite_autoindex_t1_1");
@@ -7854,6 +7928,7 @@ mod tests {
                 vec![(0, SortOrder::Asc)],
                 None,
                 &[],
+                None,
             )?,
             Index::automatic_from_primary_key(
                 &table,
@@ -7861,6 +7936,7 @@ mod tests {
                 1,
                 None,
                 &[],
+                None,
             )?,
         ];
 
@@ -8362,6 +8438,100 @@ mod tests {
                 assert_eq!(col.affinity(), affinity);
             }
         }
+    }
+
+    #[test]
+    fn test_named_unique_constraint_stores_constraint_name() {
+        let sql = r#"CREATE TABLE t_u (id INT, code TEXT CONSTRAINT t_u_code_uq UNIQUE);"#;
+        let table = BTreeTable::from_sql(sql, 0).unwrap();
+        let unique_set = table
+            .unique_sets
+            .iter()
+            .find(|us| !us.is_primary_key)
+            .unwrap();
+        assert_eq!(
+            unique_set.constraint_name,
+            Some("t_u_code_uq".to_string()),
+            "named UNIQUE constraint must store the constraint name"
+        );
+
+        let index = Index::automatic_from_unique(
+            &table,
+            ("sqlite_autoindex_t_u_1".to_string(), 2),
+            vec![(1, SortOrder::Asc)],
+            None,
+            &unique_set.columns,
+            unique_set.constraint_name.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            index.constraint_name,
+            Some("t_u_code_uq".to_string()),
+            "index built from named UNIQUE constraint must carry the constraint name"
+        );
+    }
+
+    #[test]
+    fn named_primary_and_foreign_keys_survive_sql_reconstruction() {
+        for original_sql in [
+            "CREATE TABLE child (id INTEGER CONSTRAINT custom_pk PRIMARY KEY, pid INTEGER CONSTRAINT custom_fk REFERENCES parent(id))",
+            "CREATE TABLE child (id TEXT, pid INTEGER, CONSTRAINT custom_pk PRIMARY KEY (id, pid), CONSTRAINT custom_fk FOREIGN KEY (pid) REFERENCES parent(id))",
+        ] {
+            let table = BTreeTable::from_sql(original_sql, 1).unwrap();
+            let sql = table.to_sql();
+            let restored = BTreeTable::from_sql(&sql, 1).unwrap();
+            assert_eq!(restored.primary_key_constraint_name.as_deref(), Some("custom_pk"), "{sql}");
+            assert_eq!(restored.foreign_keys[0].constraint_name.as_deref(), Some("custom_fk"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_named_unique_constraint_propagates_through_schema() {
+        let mut schema = Schema::new();
+        let table_sql =
+            r#"CREATE TABLE t_u (id INT PRIMARY KEY, code TEXT CONSTRAINT t_u_code_uq UNIQUE)"#;
+
+        schema
+            .handle_schema_row(
+                "table",
+                "t_u",
+                "t_u",
+                1,
+                Some(table_sql),
+                &SymbolTable::default(),
+                &mut vec![],
+                &mut HashMap::default(),
+                &mut HashMap::default(),
+                &mut HashMap::default(),
+                &mut HashMap::default(),
+                &|_| None,
+                &crate::dialect::SqliteDialect,
+            )
+            .unwrap();
+
+        let mut automatic_indices = HashMap::default();
+        automatic_indices.insert(
+            "t_u".to_string(),
+            vec![
+                ("sqlite_autoindex_t_u_1".to_string(), 2i64),
+                ("sqlite_autoindex_t_u_2".to_string(), 3i64),
+            ],
+        );
+
+        schema
+            .populate_indices(&SymbolTable::default(), vec![], automatic_indices, false)
+            .unwrap();
+
+        let indexes: std::vec::Vec<_> = schema.get_indices("t_u").collect();
+        let unique_idx = indexes
+            .iter()
+            .find(|idx| !idx.columns.iter().any(|c| c.name == "id"))
+            .unwrap();
+        assert_eq!(
+            unique_idx.constraint_name,
+            Some("t_u_code_uq".to_string()),
+            "named UNIQUE constraint name must propagate through schema loading"
+        );
     }
 }
 
