@@ -22,11 +22,11 @@ env:
 jobs:
   sqltest-check:
     name: Check .sqltest syntax
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -39,11 +39,11 @@ jobs:
 
   sqltest-cli:
     name: Run SQL tests (CLI backend)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -59,11 +59,11 @@ jobs:
 
   sqltest-rust:
     name: Run SQL tests (Rust backend)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -76,7 +76,7 @@ jobs:
 
   sqltest-js:
     name: Run SQL tests (JS backend, ${{ matrix.mode }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     # The normal and MVCC passes run on separate machines at the same time.
     strategy:
@@ -95,12 +95,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Both modes build the same things and share this key; one saves.
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'default' }}
       - name: Setup node
-        uses: useblacksmith/setup-node@v5
+        uses: actions/setup-node@v4
         with:
           node-version: 24
       - name: Install JS dependencies
@@ -125,11 +125,11 @@ jobs:
 
   sqltest-tursopg:
     name: Run SQL tests (tursopg backend)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -142,11 +142,11 @@ jobs:
 
   sqltest-postgres:
     name: Run SQL tests (PostgreSQL)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -164,12 +164,12 @@ jobs:
 
   pg-dump-fuzzer:
     name: PostgreSQL dump differential fuzzer
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -200,11 +200,11 @@ jobs:
 
   sqltest-sqlite:
     name: Run SQL tests (SQLite)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: useblacksmith/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}

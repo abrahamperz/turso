@@ -64,7 +64,7 @@ jobs:
           prefix-key: "v1-rust"
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: useblacksmith/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
 
@@ -132,7 +132,7 @@ jobs:
         run: cargo build --release --verbose --locked
 
       - name: Install uv
-        uses: useblacksmith/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 

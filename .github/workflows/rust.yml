@@ -25,7 +25,7 @@ env:
 
 jobs:
   license-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
       - run: cargo deny check licenses
 
   cargo-fmt-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
         run: cd fuzz && cargo fmt --check
 
   check-bindings:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -68,9 +68,9 @@ jobs:
       matrix:
         os:
           [
-            blacksmith-4vcpu-ubuntu-2404,
-            blacksmith-6vcpu-macos-latest,
-            blacksmith-8vcpu-windows-2025,
+            ubuntu-latest,
+            macos-latest,
+            windows-latest,
           ]
         # The main nextest run and the smaller suites (sync-dir, leak check,
         # doctests) run on separate machines at the same time instead of one
@@ -128,7 +128,7 @@ jobs:
           }
           echo "LIBCLANG_PATH=$dest\bin" >> $env:GITHUB_ENV
       - name: Set up Python 3.10
-        uses: useblacksmith/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
       - name: Install SQLite (Windows)
@@ -219,7 +219,7 @@ jobs:
   report-flaky-tests:
     needs: build-native
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -243,7 +243,7 @@ jobs:
   # before integrity_check's structural validation ever runs. The tests
   # exercise platform-independent core logic, so one Linux runner suffices.
   integrity-corruption-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -295,7 +295,7 @@ jobs:
           }
 
   build-wasm32-unknown-unknown:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -308,7 +308,7 @@ jobs:
         run: cargo check -p turso --target wasm32-unknown-unknown --locked
 
   check-core-no-default-features:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -319,7 +319,7 @@ jobs:
         run: cargo check -p turso_core --no-default-features --features fs --locked
 
   shuttle-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -338,7 +338,7 @@ jobs:
           make test-shuttle
 
   conn-raw-api-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -356,7 +356,7 @@ jobs:
         run: cargo nextest run -p turso_core --features conn_raw_api --locked --no-fail-fast --failure-output=final
 
   # stress-nondeterminism-check:
-  #   runs-on: blacksmith-4vcpu-ubuntu-2404
+  #   runs-on: ubuntu-latest
   #   timeout-minutes: 15
   #   steps:
   #     - uses: actions/checkout@v4
@@ -374,7 +374,7 @@ jobs:
   #         cargo run -p turso_stress -- --check-uncontrolled-nondeterminism
 
   clippy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -391,7 +391,7 @@ jobs:
           cargo clippy --workspace --all-features --all-targets --locked --exclude memory-benchmark -- --deny=warnings
 
   simulator:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       matrix:
@@ -505,7 +505,7 @@ jobs:
   # main and manual runs) use new random seeds, where a failure is a bug to
   # investigate and does not block an unrelated pull request.
   differential-fuzzer:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DIFFERENTIAL_FUZZER_TIMEOUT_SECONDS: 180
@@ -568,7 +568,7 @@ jobs:
   # also runs these fixed seeds: random IVM seeds fail on collation bugs on
   # most pushes.
   differential-fuzzer-ivm:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DIFFERENTIAL_FUZZER_TIMEOUT_SECONDS: 180
@@ -609,7 +609,7 @@ jobs:
           done
 
   test-limbo:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -623,7 +623,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install uv
-        uses: useblacksmith/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
@@ -638,7 +638,7 @@ jobs:
   # below download the binary instead of each compiling it again.
   concurrent-simulator-build:
     name: "Concurrent simulator build (${{ matrix.toolchain.label }})"
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -677,7 +677,7 @@ jobs:
 
   concurrent-simulator-regression-tests:
     name: "Concurrent simulator regression tests (${{ matrix.toolchain.label }})"
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -710,7 +710,7 @@ jobs:
 
   concurrent-simulator:
     name: "Concurrent simulator (${{ matrix.toolchain }}, ${{ matrix.profile.name }})"
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: concurrent-simulator-build
     strategy:
@@ -805,7 +805,7 @@ jobs:
           ' _
 
   concurrent-simulator-windows:
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -842,7 +842,7 @@ jobs:
         run: cargo run -q -p turso_whopper -- --mode fast --multiprocess --connections-per-process 4 --processes 4 --kill-probability 0.01 --max-steps 10000
 
   test-sqlite:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
